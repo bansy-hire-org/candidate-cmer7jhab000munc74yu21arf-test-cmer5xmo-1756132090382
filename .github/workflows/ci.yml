@@ -1,0 +1,120 @@
+name: CI/CD
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      # Detect and setup appropriate runtime based on files present
+      - name: Detect project type
+        id: detect
+        run: |
+          if [ -f "pom.xml" ]; then
+            echo "type=maven" >> $GITHUB_OUTPUT
+          elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+            echo "type=gradle" >> $GITHUB_OUTPUT
+          elif [ -f "package.json" ]; then
+            echo "type=node" >> $GITHUB_OUTPUT
+          elif [ -f "requirements.txt" ] || [ -f "setup.py" ]; then
+            echo "type=python" >> $GITHUB_OUTPUT
+          elif [ -f "go.mod" ]; then
+            echo "type=go" >> $GITHUB_OUTPUT
+          else
+            echo "type=unknown" >> $GITHUB_OUTPUT
+          fi
+      
+      # Java/Maven setup
+      - name: Set up JDK
+        if: steps.detect.outputs.type == 'maven' || steps.detect.outputs.type == 'gradle'
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+      
+      # Node.js setup
+      - name: Set up Node.js
+        if: steps.detect.outputs.type == 'node' || steps.detect.outputs.type == 'unknown'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      # Python setup
+      - name: Set up Python
+        if: steps.detect.outputs.type == 'python'
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+      
+      # Go setup
+      - name: Set up Go
+        if: steps.detect.outputs.type == 'go'
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+      
+      # Install dependencies and run tests based on project type
+      - name: Run Maven tests
+        if: steps.detect.outputs.type == 'maven'
+        run: |
+          mvn clean test -B || true
+          mvn surefire-report:report-only || true
+          if [ -f target/surefire-reports/TEST-*.xml ]; then
+            cp target/surefire-reports/TEST-*.xml test-results.xml
+          else
+            echo '{"status":"error","message":"No test results found"}' > test-results.json
+          fi
+      
+      - name: Run Gradle tests
+        if: steps.detect.outputs.type == 'gradle'
+        run: |
+          ./gradlew test || chmod +x gradlew && ./gradlew test || true
+          if [ -d build/test-results/test ]; then
+            cp build/test-results/test/*.xml test-results.xml 2>/dev/null || echo '{"status":"error","message":"No test results found"}' > test-results.json
+          else
+            echo '{"status":"error","message":"No test results found"}' > test-results.json
+          fi
+      
+      - name: Run Node.js tests
+        if: steps.detect.outputs.type == 'node'
+        run: |
+          npm ci || npm install || true
+          npm test -- --json --outputFile=test-results.json || echo '{"status":"error","message":"Test execution failed"}' > test-results.json
+      
+      - name: Run Python tests
+        if: steps.detect.outputs.type == 'python'
+        run: |
+          pip install -r requirements.txt || pip install . || true
+          python -m pytest --json-report --json-report-file=test-results.json || python -m unittest discover || echo '{"status":"error","message":"No tests found"}' > test-results.json
+      
+      - name: Run Go tests
+        if: steps.detect.outputs.type == 'go'
+        run: |
+          go test -v -json ./... > test-results.json || echo '{"status":"error","message":"Test execution failed"}' > test-results.json
+      
+      - name: Create fallback test results
+        if: steps.detect.outputs.type == 'unknown'
+        run: |
+          echo '{"status":"success","message":"No recognized test framework found","tests":[]}' > test-results.json
+      
+      # Upload test results as artifact
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            test-results.json
+            test-results.xml
+            target/surefire-reports/
+            build/test-results/
+          if-no-files-found: warn
